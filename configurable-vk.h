@@ -65,6 +65,81 @@ static inline char **get_required_extensions(){
   return dest;
 }
 
+static inline bool check_validation_layers(const char **validation_layers, uint32_t size){
+  uint32_t layer_count = 0;
+  vkEnumerateInstanceLayerProperties(&layer_count, NULL);
+  VkLayerProperties *layers = (VkLayerProperties*)malloc(layer_count * sizeof(VkLayerProperties));
+  vkEnumerateInstanceLayerProperties(&layer_count, layers);
+
+  bool found = false;
+  for(uint32_t i = 0; i < layer_count; i++){
+    for(uint32_t j = 0; j < size; j++){
+      if(strcmp(validation_layers[j], layers[i].layerName) == 0){
+        found = true;
+        break;
+      }
+    }
+  }
+
+  free(layers);
+  return found;
+}
+
+static inline VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
+  VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+  VkDebugUtilsMessageTypeFlagsEXT messageType,
+  const VkDebugUtilsMessengerCallbackDataEXT *data,
+  void *pUserData
+){
+  const char* sev = "?";
+  if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) sev = "ERROR";
+  else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) sev = "WARN";
+  else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) sev = "INFO";
+
+  const char* type = "?";
+  if(messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) type = "VALIDATION";
+  else if(messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) type = "PERFORMANCE";
+  else if(messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) type = "GENERAL";
+
+  printf("[severity: %s, type: %s]: %s", sev, type, data->pMessage);
+  return VK_FALSE;
+}
+
+static inline VkResult CreateDebugUtilsMessengerEXT(
+  VkInstance instance,
+  const VkDebugUtilsMessengerCreateInfoEXT *pCreateInfo,
+  const VkAllocationCallbacks *pAllocator,
+  VkDebugUtilsMessengerEXT *pDebugMessenger
+){
+  PFN_vkCreateDebugUtilsMessengerEXT func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+  if(func != NULL)
+    return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
+  else
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+static inline void DestroyDebugUtilsMessengerEXT(
+  VkInstance instance, 
+  VkDebugUtilsMessengerEXT debugMessnger,
+  const VkAllocationCallbacks *pAllocator
+){
+  PFN_vkDestroyDebugUtilsMessengerEXT func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+  if (func != NULL)
+    func(instance, debugMessnger, pAllocator);
+}
+
+static inline void populate_debug_messenger(VkDebugUtilsMessengerCreateInfoEXT* create_info){
+  create_info->sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+  create_info->messageSeverity = 
+    VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+    VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+  create_info->messageType = 
+    VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+    VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT|
+    VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT;
+  create_info->pfnUserCallback = DebugCallback;
+}
+
 static inline CONF_RESULT conf_CreateInstance(const InstanceConfig* config, VkInstance* out_instance){
   VkApplicationInfo app_info = {};
   app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -90,8 +165,13 @@ static inline CONF_RESULT conf_CreateInstance(const InstanceConfig* config, VkIn
   };
   uint32_t layer_count = sizeof(validation_layers) / sizeof(validation_layers[0]);
 
-  info.enabledLayerCount = layer_count;
-  info.ppEnabledLayerNames = validation_layers;
+  VkDebugUtilsMessengerCreateInfoEXT debug_info = {};
+  if(config->flags & CON_INSTANCE_VALIDATION_LAYERS_FLAG){
+    info.enabledLayerCount = layer_count;
+    info.ppEnabledLayerNames = validation_layers;
+    populate_debug_messenger(&debug_info);
+    info.pNext = &debug_info;
+  }
 
   uint32_t sdl_count = 0;
   const char* const *sdl_extensions = SDL_Vulkan_GetInstanceExtensions(&sdl_count);
@@ -114,12 +194,20 @@ static inline CONF_RESULT conf_CreateInstance(const InstanceConfig* config, VkIn
 
   info.enabledExtensionCount = total_count;
   info.ppEnabledExtensionNames = all_extensions;
-  
+
   VkResult ok = vkCreateInstance(&info, NULL, out_instance);
 
   free(all_extensions);
 
   return ok == VK_SUCCESS;
+}
+
+static inline CONF_RESULT conf_CreateDebugMessenger(const InstanceConfig* config, VkInstance instance, VkDebugUtilsMessengerEXT* out_messenger){
+  if(!(config->flags & CON_INSTANCE_VALIDATION_LAYERS_FLAG)) return false;
+  VkDebugUtilsMessengerCreateInfoEXT create_info = {};
+  populate_debug_messenger(&create_info);
+  VkResult result = CreateDebugUtilsMessengerEXT(instance, &create_info, NULL, out_messenger);
+  return result == VK_SUCCESS;
 }
 
 #endif
