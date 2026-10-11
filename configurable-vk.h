@@ -15,10 +15,15 @@
 #define CON_API_VERSION_1_3 VK_API_VERSION_1_3
 #define CON_API_VERSION_1_4 VK_API_VERSION_1_4
 
-#define CON_INSTANCE_ENGINE_PREFIX_FLAG 0b01
-#define CON_INSTANCE_VALIDATION_LAYERS_FLAG 0b10
+typedef enum{
+  INSTANCE_ENGINE_PREFIX_FLAG = 0b01,
+  INSTANCE_VALIDATION_LAYERS_FLAG = 0b10
+} InstanceFlags;
 
-typedef bool CONF_RESULT;
+typedef bool CON_RESULT;
+
+#define CON_SUCCESS true
+#define CON_FAILED false
 
 typedef struct{
   const char *title;
@@ -27,13 +32,28 @@ typedef struct{
 } WindowConfig;
 
 typedef struct{
+  SDL_Window* window;
+  VkInstance* instance;
+} SurfaceConfig;
+
+typedef struct{
   const char *application_name;
   const char *engine_name;
   uint32_t all_api_version;
   uint32_t flags;
 } InstanceConfig;
 
-static inline CONF_RESULT conf_CreateWindow(const WindowConfig* window_config, SDL_Window** out_window){
+typedef struct{
+  uint32_t graphics_family;
+  uint32_t present_family;
+} QueueFamilyIndex;
+
+typedef struct{
+  VkInstance* instance;
+  VkSurfaceKHR* surface;
+} PhysicalDeviceConfig;
+
+static inline CON_RESULT conf_CreateWindow(const WindowConfig* window_config, SDL_Window** out_window){
   if (!window_config || !out_window) {
     return false;
   }
@@ -140,7 +160,7 @@ static inline void populate_debug_messenger(VkDebugUtilsMessengerCreateInfoEXT* 
   create_info->pfnUserCallback = DebugCallback;
 }
 
-static inline CONF_RESULT conf_CreateInstance(const InstanceConfig* config, VkInstance* out_instance){
+static inline CON_RESULT conf_CreateInstance(const InstanceConfig* config, VkInstance* out_instance){
   VkApplicationInfo app_info = {};
   app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
   app_info.pApplicationName = config->application_name;
@@ -149,7 +169,7 @@ static inline CONF_RESULT conf_CreateInstance(const InstanceConfig* config, VkIn
   app_info.apiVersion = config->all_api_version;
 
   char engine_name_buffer[64];
-  if(config->flags & CON_INSTANCE_ENGINE_PREFIX_FLAG){
+  if(config->flags & INSTANCE_ENGINE_PREFIX_FLAG){
     snprintf(engine_name_buffer, sizeof(engine_name_buffer), "%s engine", config->application_name);
     app_info.pEngineName = engine_name_buffer;
   } else{
@@ -166,7 +186,7 @@ static inline CONF_RESULT conf_CreateInstance(const InstanceConfig* config, VkIn
   uint32_t layer_count = sizeof(validation_layers) / sizeof(validation_layers[0]);
 
   VkDebugUtilsMessengerCreateInfoEXT debug_info = {};
-  if(config->flags & CON_INSTANCE_VALIDATION_LAYERS_FLAG){
+  if(config->flags & INSTANCE_VALIDATION_LAYERS_FLAG){
     info.enabledLayerCount = layer_count;
     info.ppEnabledLayerNames = validation_layers;
     populate_debug_messenger(&debug_info);
@@ -176,7 +196,7 @@ static inline CONF_RESULT conf_CreateInstance(const InstanceConfig* config, VkIn
   uint32_t sdl_count = 0;
   const char* const *sdl_extensions = SDL_Vulkan_GetInstanceExtensions(&sdl_count);
   if(!sdl_extensions)
-    return false;
+    return CON_FAILED;
 
   const char *extra_extensions[] = {
     VK_EXT_DEBUG_UTILS_EXTENSION_NAME
@@ -185,7 +205,7 @@ static inline CONF_RESULT conf_CreateInstance(const InstanceConfig* config, VkIn
   Uint32 total_count = sdl_count + extra_count;
   const char **all_extensions = (const char**)malloc(total_count * sizeof(const char*));
   if(!all_extensions)
-    return false;
+    return CON_FAILED;
   memcpy(all_extensions, sdl_extensions, sdl_count * sizeof(const char *));
 
   for(Uint32 i = 0; i < extra_count; ++i){
@@ -202,12 +222,125 @@ static inline CONF_RESULT conf_CreateInstance(const InstanceConfig* config, VkIn
   return ok == VK_SUCCESS;
 }
 
-static inline CONF_RESULT conf_CreateDebugMessenger(const InstanceConfig* config, VkInstance instance, VkDebugUtilsMessengerEXT* out_messenger){
-  if(!(config->flags & CON_INSTANCE_VALIDATION_LAYERS_FLAG)) return false;
+static inline CON_RESULT conf_CreateDebugMessenger(const InstanceConfig* config, VkInstance instance, VkDebugUtilsMessengerEXT* out_messenger){
+  if(!(config->flags & INSTANCE_VALIDATION_LAYERS_FLAG)) return false;
   VkDebugUtilsMessengerCreateInfoEXT create_info = {};
   populate_debug_messenger(&create_info);
   VkResult result = CreateDebugUtilsMessengerEXT(instance, &create_info, NULL, out_messenger);
   return result == VK_SUCCESS;
+}
+
+static inline CON_RESULT conf_CreateSurface(SurfaceConfig* config, VkSurfaceKHR* out_surface){
+  return SDL_Vulkan_CreateSurface(config->window, *config->instance, nullptr, out_surface);
+}
+
+static inline QueueFamilyIndex find_family_queues(VkPhysicalDevice* device, VkSurfaceKHR surface){
+  QueueFamilyIndex indices = {.graphics_family = UINT32_MAX, .present_family = UINT32_MAX};
+
+  uint32_t count = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties(*device, &count, NULL);
+  VkQueueFamilyProperties* queues = (VkQueueFamilyProperties*)malloc(count * sizeof(VkQueueFamilyProperties));
+  vkGetPhysicalDeviceQueueFamilyProperties(*device, &count, queues);
+
+  int i = 0;
+  for(uint32_t j = 0; j < count; ++j){
+    VkBool32 present_support = false;
+    vkGetPhysicalDeviceSurfaceSupportKHR(*device, i, surface, &present_support);
+    if(queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
+      indices.graphics_family = i;
+    if(present_support)
+      indices.present_family = i;
+    if(indices.graphics_family != UINT32_MAX && indices.present_family != UINT32_MAX)
+      break;
+  }
+
+  free(queues);
+  return indices;
+}
+
+static inline bool check_physical_device_extensions(VkPhysicalDevice* device){
+  uint32_t count = 0;
+  vkEnumerateDeviceExtensionProperties(*device, NULL, &count, NULL);
+  VkExtensionProperties* extensions = (VkExtensionProperties*)malloc(count * sizeof(VkExtensionProperties));
+  vkEnumerateDeviceExtensionProperties(*device, NULL, &count, extensions);
+  if(!extensions)
+    return false;
+
+  const char *required_extensions[] = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+  };
+
+  uint32_t required_count = sizeof(required_extensions) / sizeof(required_extensions[0]);
+  bool all_found = true;
+  for(uint32_t i = 0; i < required_count; ++i){
+    bool found = false;
+    for(uint32_t j = 0; j < count; ++j){
+      if(strcmp(extensions[j].extensionName, required_extensions[i]) == 0){
+        found = true;
+        break;
+      }
+    }
+    if(!found){
+      all_found = false;
+      break;
+    }
+  }
+
+  free(extensions);
+  return true;
+}
+
+static inline bool is_physical_device_suitable(VkPhysicalDevice* device, VkSurfaceKHR* surface){
+  QueueFamilyIndex indices = find_family_queues(device, *surface);
+  bool extension_support = check_physical_device_extensions(device);
+  return (indices.graphics_family != UINT32_MAX && indices.present_family != UINT32_MAX) && extension_support;
+}
+
+static inline int rate_physical_device(VkPhysicalDevice* device, VkSurfaceKHR* surface){
+  if(!is_physical_device_suitable(device, surface)) return 0;
+  VkPhysicalDeviceProperties device_properties;
+  VkPhysicalDeviceFeatures device_features;
+  vkGetPhysicalDeviceProperties(*device, &device_properties);
+  vkGetPhysicalDeviceFeatures(*device, &device_features);
+
+  int score = 0;
+  if(device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+    score += 100;
+  score += device_properties.limits.maxImageDimension2D;
+
+  if(!device_features.geometryShader)
+    return 0;
+
+  return score;
+}
+
+static inline CON_RESULT conf_PickPhysicalDevice(const PhysicalDeviceConfig* config, VkPhysicalDevice* out_physical_device){
+  uint32_t device_count = 0;
+  vkEnumeratePhysicalDevices(*config->instance, &device_count, NULL);
+  VkPhysicalDevice* devices = (VkPhysicalDevice*)malloc(device_count * sizeof(VkPhysicalDevice));
+  if(!devices){
+    return CON_FAILED;
+  }
+  vkEnumeratePhysicalDevices(*config->instance, &device_count, devices);
+
+  VkPhysicalDevice best_choice = VK_NULL_HANDLE;
+  int32_t max_score = INT32_MIN;
+  for(uint32_t i = 0; i < device_count; ++i){
+    int score = rate_physical_device(&devices[i], config->surface);
+    if(score >= max_score){
+      max_score = score;
+      best_choice = devices[i];
+    }
+  }
+
+  free(devices);
+
+  if(max_score > INT32_MIN && best_choice != VK_NULL_HANDLE){
+    *out_physical_device = best_choice;
+    return CON_SUCCESS;
+  }
+
+  return CON_FAILED;
 }
 
 #endif
